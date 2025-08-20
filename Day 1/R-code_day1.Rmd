@@ -1,0 +1,517 @@
+---
+title: "Workshop Microbiome Data Analysis - Day 1"
+author: "Leyla Kodalci"
+output: html_document
+---
+
+# A. Install R-packages and load libraries
+
+Before starting the analysis, we need to install and load the required R packages.
+
+The **DADA2** package provides the main functions for quality filtering, error modeling, and sequence inference.\
+**Biostrings** and **ShortRead** are Bioconductor packages used for handling FASTQ files. R-package **stringr** helps with working on file names and string manipulations, and **readr** is used for reading and writing tabular data.
+
+**Important notes:**\
+You only need to run the installation commands (`install.packages` or `BiocManager::install`) once on your computer. After installation, you can comment them out (as shown below) and just load the libraries each time you start a new R session. Make sure you have an active internet connection the first time you install.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# install R-pakages
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install("dada2",version="3.11")
+# BiocManager::install("Biostrings")
+# BiocManager::install("ShortRead")
+# BiocManager::install("stringr")
+
+#Libraries
+library(dada2)
+library(Biostrings)
+library(readr)
+library(ShortRead)
+library(stringr)
+library(gridExtra)
+library(phyloseq)
+```
+
+# B. Set up working environment
+
+In this step, we define the path to the folder that contains the raw FASTQ files and prepare the input for downstream analysis.\
+A few important notes before running the code:
+
+-   Make sure to **adjust the directory path** (`reads_path`) so that it points to the folder on *your own computer* where the FASTQ files are located. Make sure to reference the **unzipped** file from the original file from Github.
+-   The forward reads contain `_R1_001.fastq.gz` in their filename and reverse reads contain `_R2_001.fastq.gz`.
+-   Filenames are expected to follow the format `SAMPLENAME_XXX.fastq.gz`. The code below will automatically extract the sample names from these filenames.
+-   Note: be careful with the use of backslashes (`\\`) on Windows paths. R requires double backslashes, or you can use one forward slashs (`/`).
+
+```{r}
+# Get path of directory that contains all of the reads
+reads_path <- "C:\\Users\\lucp9827\\Desktop\\Workshop_Leyla\\Workshop_Microbiome_JKUAT_test\\Day 1\\Fastaq files\\raw.data" 
+
+# Store path of forward and reverse reads
+Fs_path <- sort(list.files(reads_path, pattern="_R1_001.fastq.gz", full.names = TRUE))
+Rs_path <- sort(list.files(reads_path, pattern="_R2_001.fastq.gz", full.names = TRUE))
+
+# Create directories for processed forward and reverse reads
+Fs_path_filtered <- file.path(reads_path, "filtered_Fs")
+Rs_path_filtered <- file.path(reads_path, "filtered_Rs")
+
+# Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq.gz
+sample.names <- sapply(strsplit(basename(Fs_path), "_"), `[`, 1)
+
+
+names(Fs_path) <- sample.names
+names(Rs_path) <- sample.names
+```
+
+# C. DADA2 workflow
+
+## 1. Inspect quality profiles of raw reads
+
+As a first step in the DADA2 pipeline, we visualize the quality profiles of a subset of our forward and reverse reads. This helps us to decide where to truncate the reads (remove low-quality tails).
+
+In Illumina paired-end runs, quality usually starts to drop after \~220–240 bases for forward reads, and even earlier for reverse reads. We will use these plots to decide reasonable truncation lengths for later filtering and trimming.
+
+```{r}
+
+p1 = plotQualityProfile(Fs_path[1:2])
+p2 = plotQualityProfile(Rs_path[1:2])
+
+print(grid.arrange(p1, p2, nrow=2))
+
+p3 = plotQualityProfile(Fs_path[3:4])
+p4 = plotQualityProfile(Rs_path[3:4])
+
+print(grid.arrange(p3, p4, nrow=2))
+```
+
+**Question:**
+
+Based on the quality profiles you see here, at which position would you truncate the forward and reverse reads in your dataset?
+
+*Note down your chosen values,we’ll use them in the next step.*
+
+## 2. Primer check and trimming
+
+We will identify and remove the primers from our raw sequencing reads, since they are artificially introduced and contain no information for the downstream analysis.
+
+First, we define the forward and reverse primer sequences and check for their presence in our FASTQ files. Because primers can appear in different orientations (forward, reverse, complement, reverse complement), we generate all possible orientations and scan for them.
+
+We then filter the reads and trim off the primer sequences based on their known lengths.\
+Be careful to **adjust the truncation lengths (`truncLen`)** to your dataset. The values used below (`240` for forward, `200` for reverse) are only an example and should be optimized based on your quality profiles.
+
+!This step may take some time depending on the size of your dataset and computer speed. (15min)
+
+```{r}
+## Identify Primers
+
+# Specify forward and reverse primers used
+fwd_primer <- "GTGCCAGCMGCCGCGGTAA"
+rev_primer <- "GGACTACVSGGGTATCTAAT"
+
+# Function to define all orientations of the primers
+allOrients <- function(primer) {
+    # Create all orientations of the input sequence
+    require(Biostrings)
+    dna <- DNAString(primer)  # The Biostrings works w/ DNAString objects rather than character vectors
+    orients <- c(Forward = dna, Complement = Biostrings::complement(dna), Reverse = Biostrings::reverse(dna),
+        RevComp = Biostrings::reverseComplement(dna))
+    return(sapply(orients, toString))  # Convert back to character vector
+}
+
+
+FWD.orients <- allOrients(fwd_primer)
+REV.orients <- allOrients(rev_primer)
+print(FWD.orients)
+print(REV.orients)
+
+
+primerHits <- function(primer, fn) {
+    # Counts number of reads in which the primer is found
+    nhits <- vcountPattern(primer, sread(readFastq(fn)), fixed = FALSE)
+    return(sum(nhits > 0))
+}
+
+hits_table <- rbind(FWD.ForwardReads = sapply(FWD.orients, primerHits, fn = Fs_path[[1]]), FWD.ReverseReads = sapply(FWD.orients,
+    primerHits, fn = Rs_path[[1]]), REV.ForwardReads = sapply(REV.orients, primerHits,
+    fn = Fs_path[[1]]), REV.ReverseReads = sapply(REV.orients, primerHits, fn = Rs_path[[1]]))
+
+print(hits_table)
+
+```
+
+**Questions:**
+
+1.  Do the forward primers mainly occur in the forward reads, and reverse primers in the reverse reads?
+
+2.  Are there any unexpected hits?
+
+3.  What does this tell you about trimming?
+
+------------------------------------------------------------------------
+
+Now that we have confirmed the presence of primers in our raw reads, the next step is to **remove primers and trim the reads**. We use the known primer lengths (`lenF` and `lenR`) to cut the primer sequences from the start of each read (`trimLeft`). We then truncate the reads at positions where quality typically begins to drop (`truncLen`). Here, we use *240* bases for forward reads and *240* bases for reverse reads as example values but these should be adjusted based on your own quality profiles.
+
+Additional filtering options:
+
+-   `maxEE` = maximum expected errors allowed per read (a more reliable filter than average quality score).
+-   `rm.phix=TRUE` removes any reads that match the PhiX control genome (commonly included in Illumina runs).
+-   `compress=TRUE` ensures that output files are written in compressed `.gz` format.
+-   The truncation lengths (`truncLen`) should be chosen carefully from your quality plots. If they are too short, you may lose overlap between forward and reverse reads; if too long, you may keep low-quality bases that introduce errors.
+
+```{r}
+## Primer removal and Trimming 
+
+# Lengths of your forward and reverse primers
+lenF <- nchar(fwd_primer)
+lenR <- nchar(rev_primer)
+
+
+out <- filterAndTrim(Fs_path, Fs_path_filtered,
+                     Rs_path, Rs_path_filtered,
+                     trimLeft=c(lenF, lenR),   # remove primers
+                     truncLen=c(240,240),     # example truncation
+                     maxEE=c(2,2),
+                     truncQ=2,
+                     rm.phix=TRUE,
+                     compress=TRUE)
+
+print(out)
+
+## Visualiasing retention after filtering 
+
+# Convert to dataframe
+out_df <- as.data.frame(out)
+out_df$Sample <- rownames(out_df)
+
+# Calculate percentage retained
+out_df$perc_retained <- (out_df$reads.out / out_df$reads.in) * 100
+print(out_df)
+```
+
+The code below is a check to see the trimming and filtering effects on the raw reads.
+
+```{r}
+## Sanity check: Quality profiles
+
+# Store path of forward and reverse filetered reads
+fil_Fs_path <- sort(list.files(Fs_path_filtered, pattern="_R1_001.fastq.gz", full.names = TRUE))
+fil_Rs_path <- sort(list.files(Rs_path_filtered, pattern="_R2_001.fastq.gz", full.names = TRUE))
+
+p3 = plotQualityProfile(fil_Fs_path[3:4])
+p4 = plotQualityProfile(fil_Rs_path[3:4])
+
+print(grid.arrange(p3, p4, nrow=2))
+
+# Primer hits
+
+hits_table <- rbind(FWD.ForwardReads = sapply(FWD.orients, primerHits, fn = fil_Fs_path[[1]]), FWD.ReverseReads = sapply(FWD.orients,
+    primerHits, fn = fil_Rs_path[[1]]), REV.ForwardReads = sapply(REV.orients, primerHits,
+    fn = fil_Fs_path[[1]]), REV.ReverseReads = sapply(REV.orients, primerHits, fn = fil_Rs_path[[1]]))
+
+print(hits_table)
+
+
+```
+
+**Questions:**
+
+1.  Are there large differences between the raw and filtered read counts? If yes, what might explain the loss reads?
+
+2.  Why is it important to check these numbers before moving on to the next step in the pipeline?
+
+3.  After filtering, do your reads appear shorter by the number of bases corresponding to the primer length?
+
+4.  After removing the primers with `trimLeft`, are there still primers found in the reads? If yes, why would you think these hits are still present?
+
+## 3. Learning the error rates
+
+After filtering and trimming, DADA2 needs to learn the **error rates** in the sequencing data. Sequencing machines introduce errors (substitutions, insertions, deletions) that we must model in order to distinguish true biological variation from technical noise.
+
+-   The `learnErrors()` function estimates these error rates directly from your dataset. DADA2 then uses this information to accurately infer real amplicon sequence variants (ASVs).
+
+-   The `plotErrors()` function visualises the estimated error rates and compares them to the expected quality scores. Ideally, the points (observed errors) should closely follow the black line (expected).
+
+Note: As this step takes some time to run, we have **precomputed the error models** for you.\
+You can **load them immediately** and continue, or run the full computation yourself (e.g., after the worlshopor overnight).
+
+```{r}
+## Code to learn error rates
+# errF <- learnErrors(fil_Fs_path,nbases = 1e7, multithread=TRUE)
+# errR <- learnErrors(fil_Rs_path,nbases = 1e7, multithread=TRUE)
+
+## Loas in error rates 
+path_error = "C:\\Users\\lucp9827\\Desktop\\Workshop_Leyla\\Workshop_Microbiome_JKUAT_test\\Day 1\\Data\\"
+
+load(paste0(path_error,"errorsF.RData"))
+load(paste0(path_error,"errorsR.RData"))
+
+# Plot error rates
+
+plotErrors(errF, nominalQ=TRUE)
+
+plotErrors(errR, nominalQ=TRUE)
+```
+
+**Questions:**
+
+1.  Looking at this plot , do you think our error model is well fitted?
+
+2.  If you see a more horizontal error line, does that mean something went wrong?
+
+3.  What would you check if the observed points were very far from the fitted black line?
+
+## 4. Sample inference
+
+Once error rates have been learned, the next step is to dereplicate the reads and apply the DADA2 core algorithm.
+
+-   **Dereplication**: identical sequencing reads within each sample are collapsed into unique sequences with their abundances recorded. This dramatically reduces computation time. It also allows the algorithm to model abundance information, which helps distinguish true variants from sequencing errors.
+
+-   **Sample inference with `dada()`**: Using the learned error model, DADA2 compares each unique sequence against the expected error rates. It determines whether a sequence is most likely a real **amplicon sequence variant (ASV)** or simply the result of an error from a more abundant sequence. This step is the heart of the DADA2 pipeline, where noisy reads are turned into high-resolution biological sequences.
+
+Note: As dada allogorithm takes some time to run, we have **precomputed the core algorithm** for you.\
+You can **load them immediately** and continue, or run the full computation yourself (e.g., after workshop or overnight).
+
+```{r}
+# Dereplication 
+derep_forward <- derepFastq(fil_Fs_path, verbose = TRUE)
+derep_reverse <- derepFastq(fil_Rs_path, verbose = TRUE)
+
+## Apply the core sample inference algorithm to the dereplicated data
+#dadaFs <- dada(derep_forward, err=errF, multithread=TRUE)
+#dadaRs <- dada(derep_reverse, err=errR, multithread=TRUE)
+
+
+## Load results of dada core algorithm
+path_core = "C:\\Users\\lucp9827\\Desktop\\Workshop_Leyla\\Workshop_Microbiome_JKUAT_test\\Day 1\\Data\\"
+
+load(paste0(path_core,"dadaFs.RData"))
+load(paste0(path_core,"dadaRs.RData"))
+
+
+print(dadaFs[[1]])
+print(dadaRs[[1]])
+
+
+```
+
+**Question:**
+
+Why do we expect the number of unique sequences to be much higher than the actual number of true variants?
+
+## 5. Merge paired reads
+
+In this step, we merge the forward and reverse reads back together to reconstruct the full amplicon sequence.
+
+-   `mergePairs()` aligns each forward and reverse read by their overlapping region. By default, merged sequences are only kept if the forward and reverse reads overlap by min. 12 bases and are identical to each other in the overlap region.
+
+```{r}
+mergers <- mergePairs(dadaFs, fil_Fs_path, dadaRs, fil_Rs_path, verbose=TRUE)
+
+# Inspect the merger data.frame from the first sample
+head(mergers[[1]])
+```
+
+**Questions:**
+
+1.  What percentage of reads were succesfully merged for your samples? (Hint: check messages in R-console)
+
+2.  What does a high proportion of successfully merged reads tell us about our chosen truncation lengths and read overlap?
+
+3.  How can we interpret the result for sample 1?
+
+## 5. Construct sequence table
+
+We can now construct an amplicon sequence variant table (ASV) table.
+
+```{r}
+seqtab <- makeSequenceTable(mergers)
+
+dim(seqtab)
+
+# Inspect distribution of sequence lengths
+table(nchar(getSequences(seqtab)))
+```
+
+**Question:**
+
+1.  How many ASVs where identified?
+
+2.  What does the sequence length distribution tell us?
+
+## 6. Remove chimeras
+
+Chimeras are artificial sequences formed during PCR when two parent DNA fragments are incorrectly joined together. They are common in amplicon sequencing and, if not removed, can inflate diversity estimates by introducing spurious variants.
+
+In this step, we use `removeBimeraDenovo()` to identify and remove chimeric sequences. The `method="consensus"` option compares each sequence to others in the dataset and flags sequences that can be explained as a combination of more abundant “parent” sequences.
+
+Note: if a very large fraction of reads are flagged as chimeric, it may indicate issues with primer trimming, sequencing quality, or overly aggressive parameters in previous steps.
+
+```{r}
+
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+
+dim(seqtab.nochim)
+sum(seqtab.nochim)/sum(seqtab)
+
+```
+
+**Questions:**
+
+1.  What fraction of reads were retained after chimera removal?
+
+2.  Why is it expected that such a large fraction of unique sequences are removed as chimeras?
+
+## 7. Track reads
+
+Before assigning taxonomy, it is important to check how many reads remain at each step of the pipeline. This helps us verify that our filtering, denoising, merging, and chimera removal worked as expected and that we still have enough data per sample for reliable downstream analysis.
+
+The tracking table shows how reads were progressively reduced from raw input to the final non-chimeric sequences. Some read loss is normal (and desirable, since we remove low-quality reads and artifacts), but very low retention could signal problems with quality, filtering parameters, or specific samples.
+
+```{r}
+getN <- function(x) sum(getUniques(x))
+
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+
+print(track)
+```
+
+**Questions**:
+
+-   At which step do we lose the largest proportion of reads across samples? Why do you think that happens?
+
+-   Why is it okay (and even necessary) to lose such a large fraction of reads during filtering and chimera removal?
+
+-   Looking across samples, are there any that stand out with unusually high or low retention? What could that mean about data quality?
+
+-   If a sample ended with very few non-chimeric reads, what would that mean for its downstream analysis?
+
+## 8. Assign taxonomy
+
+Now that we have obtained a high-quality set of non-chimeric ASVs, the next step is to assign taxonomy to these sequences. This allows us to connect each ASV to known microbial groups and interpret the biological meaning of our dataset.
+
+-   We use the **`assignTaxonomy()`** function in DADA2 to classify ASVs against a curated reference database. Here we use the **SILVA v138.2 database**, one of the most comprehensive 16S/18S rRNA reference sets. These DADA2-formatted [training fasta files were derived from the Silva Project's version 138.2 release](https://zenodo.org/records/14169026): <https://www.arb-silva.de/.>
+
+-   The taxonomy assignment proceeds from higher to lower ranks (Kingdom → Phylum → Class → Order → Family → Genus).
+
+-   We then refine the classification with **`addSpecies()`**, which compares sequences to exact matches in the reference database to assign species names when possible.
+
+-   The resulting table (`taxa`) gives us the taxonomic identity of each ASV, which is essential for downstream analyses such as community composition, diversity, and differential abundance.
+
+```{r}
+
+taxa <- assignTaxonomy(seqtab.nochim, "C:\\Users\\lucp9827\\Desktop\\Workshop_Leyla\\Workshop_Microbiome_JKUAT_test\\Day 1\\Data/silva_nr99_v138.2_toSpecies_trainset.fa.gz", multithread=TRUE)
+
+taxa <- addSpecies(taxa, "C:\\Users\\lucp9827\\Desktop\\Workshop_Leyla\\Workshop_Microbiome_JKUAT_test\\Day 1\\Data/silva_v138.2_assignSpecies.fa.gz")
+
+
+taxa.print <- taxa # Removing sequence rownames for display only
+rownames(taxa.print) <- NULL
+print(head(taxa.print))
+
+# Count how many ASVs got a genus assignment
+sum(!is.na(taxa[, "Genus"]))
+
+# Count how many ASVs got a species assignment
+sum(!is.na(taxa[, "Species"]))
+
+# Proportion of ASVs with species-level classification
+sum(!is.na(taxa[, "Species"])) / nrow(taxa)
+```
+
+**Questions:**
+
+Why do you think there are usually fewer ASVs with species-level assignments than genus-level?
+
+## 9. Convert to phyloseq-object
+
+We combine our ASV table (`seqtab.nochim`), taxonomy table (`taxa`), and sample metadata into a `phyloseq` object. This makes downstream microbiome analysis much easier, because all components are stored in one structured format.
+
+A `phyloseq` object can contain:
+
+-   **otu_table** → the abundance of ASVs across samples
+
+-   **tax_table** → the taxonomy assigned to each ASV
+
+-   **sample_data** → metadata describing each sample
+
+-   (optional) **phylogenetic tree**
+
+Here we:
+
+1.  Build the phyloseq object `ps`.
+
+2.  Save it as an `.RData` file so you don’t need to rebuild it later.
+
+3.  (Optional) Replace long ASV sequences with shorter IDs (`ASV1`, `ASV2`, …) for clearer plotting. And create a lookup table linking the short ASV IDs to the full sequences and taxonomy. This way, the `phyloseq` object is clean to work with, while the reference table preserves all detailed information for interpretation and reproducibility.\
+
+```{r}
+
+## Keep taxa_are_rows=FALSE because seqtab.nochim has samples in rows and ASVs in columns.
+otu <- otu_table(seqtab.nochim, taxa_are_rows = FALSE)
+
+## Ensure taxonomy is a proper matrix for phyloseq::tax_table()
+tax <- tax_table(as.matrix(taxa))  # taxa rows correspond to ASVs (columns of seqtab.nochim)
+
+## Add sample meta data 
+
+meta <- read.table("C:\\Users\\lucp9827\\Desktop\\Workshop_Leyla\\Workshop_Microbiome_JKUAT_test\\Day 1\\Data\\sample-metadata.tsv",
+                   header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+# Set rownames to SampleID (or the column that matches seqtab.nochim rownames)
+rownames(meta) <- paste0(meta$SampleID,"_S1_L002_R1_001.fastq.gz")
+smd <- sample_data(meta)
+
+# Build phyloseq without sample_data
+ps <- phyloseq(otu, tax,smd)
+
+ps
+
+save(ps, file = "C:\\Users\\lucp9827\\Desktop\\Workshop_Leyla\\Workshop_Microbiome_JKUAT_test\\Day 1\\phyloseq_object.RData")
+
+####  OPtional:Replace longs ASV names with short ones ####
+
+# 1. Extract sequences (original long rownames of your ASV table)
+asv_seqs <- taxa_names(ps)
+
+# 2. Create short ASV IDs
+asv_ids <- paste0("ASV", seq_along(asv_seqs))
+
+# 3. Replace taxa_names in the phyloseq object with ASV IDs
+taxa_names(ps) <- asv_ids
+
+# 4. Create lookup table with sequence + taxonomy
+taxa_df <- as.data.frame(tax_table(ps))  # extract taxonomy as a dataframe
+asv_lookup <- cbind(ASV_ID = asv_ids, Sequence = asv_seqs, taxa_df)
+
+
+save(asv_lookup, file = "C:\\Users\\lucp9827\\Desktop\\Workshop_Leyla\\Workshop_Microbiome_JKUAT_test\\Day 1\\Data\\asv_reference.RData")
+
+write.csv(asv_lookup, "C:\\Users\\lucp9827\\Desktop\\Workshop_Leyla\\Workshop_Microbiome_JKUAT_test\\Day 1\\Data\\ASV_taxonomy_lookup.csv", row.names = FALSE)
+
+save(ps, file = "C:\\Users\\lucp9827\\Desktop\\Workshop_Leyla\\Workshop_Microbiome_JKUAT_test\\Day 1\\phyloseq_object_short.RData")
+```
+
+## 10. (Optional) Basic phyloseq functions
+
+For those who finish early, here are some **basic `phyloseq` functions** you can try out to get a first feel for your dataset. These commands won’t change anything in your data they just describe or visualize what you’ve already built.
+
+```{r}
+
+load("C:\\Users\\lucp9827\\Desktop\\Workshop_Leyla\\Workshop_Microbiome_JKUAT_test\\Day 1\\phyloseq_object_short.RData")
+
+ps
+
+sample_names(ps)[1:5]   # first 5 sample IDs
+taxa_names(ps)[1:5]     # first 5 ASV IDs
+rank_names(ps)          # available taxonomic ranks
+sample_variables(ps)
+
+sample_sums(ps)         # number of reads per sample
+taxa_sums(ps)[1:10]     # most abundant ASVs
+min(sample_sums(ps))    # check smallest sample depth
+
+```
